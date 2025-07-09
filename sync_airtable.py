@@ -90,22 +90,27 @@ SKU_AT_FIELD  = CSV_FIELD_MAP_LOWER[SKU_CSV_FIELD]
 
 def compute_price(data: dict) -> float:
     """
-    Calculates the final price from 'Einkaufspreis netto' using your tiers:
-      - cost < 6       : divide by 0.60
-      - 6 ≤ cost ≤ 11  : divide by 0.72
-      - cost > 11      : divide by 0.75
+    1) Compute pre‐tax markup:
+       - cost < 6       : divide by 0.60
+       - 6 ≤ cost ≤ 11  : divide by 0.72
+       - cost > 11      : divide by 0.75
+      Then floor, add .45 if frac ≤ .69 else .89.
 
-    Then:
-      1. Floor the result to an integer
-      2. Look at the decimal remainder:
-         - if .01–.69  → add €0.45
-         - if .70–.99  → add €0.89
-      3. Multiply by 1.2 (tax)
-      4. Round to two decimals
+    2) Apply 20% tax.
+
+    3) On the taxed result, floor again and
+       add .45 if its frac ≤ .69 else .89,
+       so final decimals are always .45 or .89.
     """
-    cost = float(data.get('Einkaufspreis netto', 0))
+    # pull & normalize your CSV value (lowercase header)
+    raw_cost = data.get('einkaufspreis netto', '') or '0'
+    cost = float(raw_cost.replace(',', '.'))
 
-    # Step 1: Choose divisor
+def calculate_net_price(cost: float) -> float:
+    """
+    Given a net cost, applies your tiered markup and
+    rounds up to the nearest .45/.89, *before* tax.
+    """
     if cost < 6:
         div = 0.60
     elif cost <= 11:
@@ -113,23 +118,48 @@ def compute_price(data: dict) -> float:
     else:
         div = 0.75
 
-    # Step 2: Compute raw price and split
     raw = cost / div
     base = math.floor(raw)
     frac = raw - base
+    add = 0.45 if frac <= 0.69 else 0.89
+    return base + add
 
-    # Step 3: Add per-decimal rules
-    if 0.01 <= frac <= 0.69:
-        add = 0.45
-    elif 0.70 <= frac <= 0.99:
-        add = 0.89
-    else:
-        add = 0.0
+def compute_price_breakdown(data: dict) -> dict[str, float]:
+    """
+    Reads 'einkaufspreis netto' from `data`, and returns:
+      - price_pre_tax   (float): net sale-price before tax
+      - final_price     (float): with 20% VAT, ending .45/.89
+      - margin_pre_tax  (float): (final_price / 1.2) - cost
+    """
+    # 1) Parse your raw cost (normalize commas to dots)
+    raw_cost = data.get('einkaufspreis netto', '') or '0'
+    cost     = float(raw_cost.replace(',', '.'))
 
-    # Step 4: Apply tax
-    taxed = (base + add) * 1.2
+    # 2) Compute net (pre-tax) price
+    price_pre_tax = calculate_net_price(cost)
 
-    return round(taxed, 2)
+    # 3) Compute margin as what you actually keep net of VAT
+    #    i.e. back out the 20% VAT from the final price, then subtract cost
+    taxed_raw    = price_pre_tax * 1.2
+    base2        = math.floor(taxed_raw)
+    frac2        = taxed_raw - base2
+    add2         = 0.45 if frac2 <= 0.69 else 0.89
+    final_price  = base2 + add2
+
+    margin_pre_tax = (final_price / 1.2) - cost
+
+    # 4) Apply 20% tax, then round to .45/.89 again
+    taxed_raw = price_pre_tax * 1.2
+    base2     = math.floor(taxed_raw)
+    frac2     = taxed_raw - base2
+    add2      = 0.45 if frac2 <= 0.69 else 0.89
+    final_price = base2 + add2
+
+    return {
+        "price_pre_tax":  round(price_pre_tax,  2),
+        "final_price":    round(final_price,    2),
+        "margin_pre_tax": round(margin_pre_tax, 2)
+    }
 
 
 def fetch_csv_rows(url: str) -> list[dict]:
@@ -178,19 +208,30 @@ def build_fields(data: dict, include_excluded: bool = False) -> dict:
       - Skip EXCLUDE_FIELDS
     """
     out = {}
+    breakdown = compute_price_breakdown(data)
+
+    # 1) Map & compute existing CSV→Airtable fields…
     for csv_col, at_field in CSV_FIELD_MAP_LOWER.items():
-        if at_field in EXCLUDE_FIELDS:
+        if not include_excluded and at_field in EXCLUDE_FIELDS:
             continue
 
         if csv_col == 'einkaufspreis netto':
-            val = compute_price(data)
+            # shove the final, taxed price into variants.price
+            val = breakdown['final_price']
         else:
             val = data.get(csv_col)
 
         if val not in (None, ''):
-            if not isinstance(val, str):
-                val = str(val)
-            out[at_field] = val
+            out[at_field] = str(val)
+
+    # 2) Raw cost
+    raw = data.get('einkaufspreis netto')
+    if raw not in (None, ''):
+        out['Einkaufspreis netto'] = raw
+
+    # 3) Your net margin (pre-tax) into the price.margin field
+    out['price.margin'] = str(breakdown['margin_pre_tax'])
+
     return out
 
 
