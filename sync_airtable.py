@@ -78,6 +78,9 @@ CSV_TO_AIRTABLE_FIELD_MAP = {
     "Weingeschmack": "metafield.custom.rests_e",
     # from stock.csv, renamed here to trigger compute_price:
     "Einkaufspreis netto": "variants.price",
+    "Status": "csv.Status",
+    "Menge": "variants.inventoryQuantities"
+}
 }
 
 # Normalize mapping keys for lookups against lowercase CSV headers:
